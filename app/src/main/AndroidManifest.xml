@@ -7,7 +7,9 @@
     <application
         android:theme="@style/AppTheme"
         android:label="Polygon"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:icon="@drawable/ic_polygon"
+        android:roundIcon="@drawable/ic_polygon">
 
         <activity
             android:name=".MainActivity"
