@@ -8,6 +8,8 @@ import android.graphics.Typeface;
 import android.view.MotionEvent;
 import android.view.View;
 
+import java.util.List;
+
 public class PolygonMapView extends View {
 
     private final Paint backgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -16,12 +18,13 @@ public class PolygonMapView extends View {
 
     private final Path hexPath = new Path();
 
-    // Posición y escala del mapa
+    private final SectorManager sectorManager;
+    private final List<SectorManager.Sector> sectors;
+
     private float mapOffsetX = 0f;
     private float mapOffsetY = 0f;
     private float mapScale = 1f;
 
-    // Gestos
     private float lastX;
     private float lastY;
 
@@ -32,13 +35,13 @@ public class PolygonMapView extends View {
     private boolean dragging = false;
     private boolean zooming = false;
 
-    // Tamaño de los hexágonos
-    private static final float HEX_RADIUS = 38f;
-
     public PolygonMapView(Context context) {
         super(context);
 
         setFocusable(true);
+
+        sectorManager = new SectorManager(context);
+        sectors = sectorManager.getSectors();
 
         hexPaint.setStyle(Paint.Style.STROKE);
         hexPaint.setStrokeWidth(2.0f);
@@ -46,16 +49,12 @@ public class PolygonMapView extends View {
 
         titlePaint.setTextAlign(Paint.Align.CENTER);
         titlePaint.setAntiAlias(true);
-        titlePaint.setTypeface(
-                Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        );
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
 
-        // Fondo
         backgroundPaint.setColor(0xFF05060B);
 
         canvas.drawRect(
@@ -67,7 +66,7 @@ public class PolygonMapView extends View {
         );
 
         // =========================
-        // MAPA
+        // MAPA REAL
         // =========================
 
         canvas.save();
@@ -79,12 +78,12 @@ public class PolygonMapView extends View {
 
         canvas.scale(mapScale, mapScale);
 
-        drawHexGrid(canvas);
+        drawRealSectors(canvas);
 
         canvas.restore();
 
         // =========================
-        // ENCABEZADO FIJO
+        // ENCABEZADO
         // =========================
 
         titlePaint.setColor(0xFFFFFFFF);
@@ -113,71 +112,41 @@ public class PolygonMapView extends View {
         );
     }
 
-    private void drawHexGrid(Canvas canvas) {
+    private void drawRealSectors(Canvas canvas) {
 
-        float horizontalSpacing = HEX_RADIUS * 1.73f;
-        float verticalSpacing = HEX_RADIUS * 1.50f;
+        hexPaint.setStyle(Paint.Style.STROKE);
+        hexPaint.setStrokeWidth(2.0f);
+        hexPaint.setColor(0xFF4A4F5A);
 
-        // Malla deliberadamente grande.
-        // Se extiende mucho más allá de la pantalla
-        // para probar pan y zoom.
+        for (SectorManager.Sector sector : sectors) {
 
-        for (int row = -18; row <= 18; row++) {
+            float[] points = sector.points;
 
-            for (int col = -18; col <= 18; col++) {
+            if (points.length < 6) {
+                continue;
+            }
 
-                float x = col * horizontalSpacing;
-                float y = row * verticalSpacing;
+            hexPath.reset();
 
-                if (row % 2 != 0) {
-                    x += horizontalSpacing / 2f;
+            for (int i = 0; i < points.length; i += 2) {
+
+                float x = points[i];
+                float y = points[i + 1];
+
+                if (i == 0) {
+                    hexPath.moveTo(x, y);
+                } else {
+                    hexPath.lineTo(x, y);
                 }
-
-                drawHexagon(
-                        canvas,
-                        x,
-                        y,
-                        HEX_RADIUS
-                );
             }
+
+            hexPath.close();
+
+            canvas.drawPath(
+                    hexPath,
+                    hexPaint
+            );
         }
-    }
-
-    private void drawHexagon(
-            Canvas canvas,
-            float centerX,
-            float centerY,
-            float radius
-    ) {
-
-        hexPath.reset();
-
-        for (int i = 0; i < 6; i++) {
-
-            double angle =
-                    Math.toRadians(60 * i - 30);
-
-            float x =
-                    centerX +
-                    (float) Math.cos(angle) * radius;
-
-            float y =
-                    centerY +
-                    (float) Math.sin(angle) * radius;
-
-            if (i == 0) {
-                hexPath.moveTo(x, y);
-            } else {
-                hexPath.lineTo(x, y);
-            }
-        }
-
-        hexPath.close();
-
-        canvas.drawPath(
-                hexPath,
-                hexPaint
-        );
     }
 
     // =========================
@@ -225,23 +194,22 @@ public class PolygonMapView extends View {
                         float scaleFactor =
                                 newDistance / lastDistance;
 
-                        float newScale =
-                                mapScale * scaleFactor;
+                        mapScale *= scaleFactor;
 
-                        // Límites del zoom
-                        newScale = Math.max(
+                        mapScale = Math.max(
                                 0.45f,
-                                Math.min(4.0f, newScale)
+                                Math.min(4.0f, mapScale)
                         );
-
-                        mapScale = newScale;
                     }
 
                     float newMidX = midpointX(event);
                     float newMidY = midpointY(event);
 
-                    mapOffsetX += newMidX - lastMidX;
-                    mapOffsetY += newMidY - lastMidY;
+                    mapOffsetX +=
+                            newMidX - lastMidX;
+
+                    mapOffsetY +=
+                            newMidY - lastMidY;
 
                     lastDistance = newDistance;
                     lastMidX = newMidX;
@@ -252,7 +220,8 @@ public class PolygonMapView extends View {
                     return true;
                 }
 
-                if (dragging && event.getPointerCount() == 1) {
+                if (dragging &&
+                        event.getPointerCount() == 1) {
 
                     float x = event.getX();
                     float y = event.getY();
@@ -273,10 +242,7 @@ public class PolygonMapView extends View {
             case MotionEvent.ACTION_POINTER_UP:
 
                 zooming = false;
-
-                if (event.getPointerCount() <= 2) {
-                    dragging = false;
-                }
+                dragging = false;
 
                 return true;
 
@@ -311,10 +277,6 @@ public class PolygonMapView extends View {
 
     private float midpointX(MotionEvent event) {
 
-        if (event.getPointerCount() < 2) {
-            return 0f;
-        }
-
         return (
                 event.getX(0) +
                 event.getX(1)
@@ -323,13 +285,9 @@ public class PolygonMapView extends View {
 
     private float midpointY(MotionEvent event) {
 
-        if (event.getPointerCount() < 2) {
-            return 0f;
-        }
-
         return (
                 event.getY(0) +
                 event.getY(1)
         ) / 2f;
     }
-        }
+}
