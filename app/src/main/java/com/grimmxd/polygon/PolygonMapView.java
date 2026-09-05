@@ -8,27 +8,36 @@ import android.graphics.Typeface;
 import android.view.MotionEvent;
 import android.view.View;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 public class PolygonMapView extends View {
 
     private final Paint backgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint hexPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint roadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint sectorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint titlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-    private final Path hexPath = new Path();
+    private final Path path = new Path();
 
     private final SectorManager sectorManager;
     private final List<SectorManager.Sector> sectors;
+
+    private final List<Road> roads = new ArrayList<>();
 
     // Transformación del mapa
     private float mapOffsetX = 0f;
     private float mapOffsetY = 0f;
     private float mapScale = 1f;
 
-    // Centro y escala de la geometría real
     private float dataCenterX = 0f;
     private float dataCenterY = 0f;
+
     private float initialScale = 1f;
 
     // Gestos
@@ -53,21 +62,121 @@ public class PolygonMapView extends View {
         sectorManager = new SectorManager(context);
         sectors = sectorManager.getSectors();
 
-        hexPaint.setStyle(Paint.Style.STROKE);
-        hexPaint.setStrokeWidth(2.0f);
-        hexPaint.setColor(0xFF4A4F5A);
+        loadRoads(context);
+        calculateDataBounds();
 
+        // Sectores
+        sectorPaint.setStyle(Paint.Style.STROKE);
+        sectorPaint.setStrokeWidth(1.6f);
+        sectorPaint.setColor(0xFF3E4652);
+
+        // Calles
+        roadPaint.setStyle(Paint.Style.STROKE);
+        roadPaint.setStrokeCap(Paint.Cap.ROUND);
+        roadPaint.setStrokeJoin(Paint.Join.ROUND);
+
+        // Título
         titlePaint.setTextAlign(Paint.Align.CENTER);
         titlePaint.setAntiAlias(true);
-
-        calculateDataBounds();
     }
 
-    private void calculateDataBounds() {
+    // =========================================================
+    // CARRETERAS
+    // =========================================================
 
-        if (sectors.isEmpty()) {
-            return;
+    private static class Road {
+
+        final String type;
+        final String name;
+        final float[] points;
+
+        Road(String type, String name, float[] points) {
+            this.type = type;
+            this.name = name;
+            this.points = points;
         }
+    }
+
+    private void loadRoads(Context context) {
+
+        try {
+
+            InputStream input =
+                    context.getAssets().open("roads_el_tigre.json");
+
+            byte[] bytes =
+                    new byte[input.available()];
+
+            input.read(bytes);
+            input.close();
+
+            String json =
+                    new String(bytes, StandardCharsets.UTF_8);
+
+            JSONObject root =
+                    new JSONObject(json);
+
+            JSONArray roadArray =
+                    root.getJSONArray("roads");
+
+            for (int i = 0; i < roadArray.length(); i++) {
+
+                JSONObject roadObject =
+                        roadArray.getJSONObject(i);
+
+                String type =
+                        roadObject.optString(
+                                "type",
+                                "residential"
+                        );
+
+                String name =
+                        roadObject.optString(
+                                "name",
+                                ""
+                        );
+
+                JSONArray pointArray =
+                        roadObject.getJSONArray("points");
+
+                float[] points =
+                        new float[pointArray.length() * 2];
+
+                for (int p = 0; p < pointArray.length(); p++) {
+
+                    JSONArray point =
+                            pointArray.getJSONArray(p);
+
+                    points[p * 2] =
+                            (float) point.getDouble(0);
+
+                    points[p * 2 + 1] =
+                            (float) point.getDouble(1);
+                }
+
+                if (points.length >= 4) {
+
+                    roads.add(
+                            new Road(
+                                    type,
+                                    name,
+                                    points
+                            )
+                    );
+                }
+            }
+
+        } catch (Exception e) {
+
+            e.printStackTrace();
+        }
+    }
+
+    // =========================================================
+    // LÍMITES DEL MAPA
+    // =========================================================
+
+    private void calculateDataBounds() {
 
         float minX = Float.MAX_VALUE;
         float minY = Float.MAX_VALUE;
@@ -75,6 +184,9 @@ public class PolygonMapView extends View {
         float maxX = -Float.MAX_VALUE;
         float maxY = -Float.MAX_VALUE;
 
+        boolean found = false;
+
+        // Sectores
         for (SectorManager.Sector sector : sectors) {
 
             float[] points = sector.points;
@@ -89,12 +201,45 @@ public class PolygonMapView extends View {
 
                 minY = Math.min(minY, y);
                 maxY = Math.max(maxY, y);
+
+                found = true;
             }
         }
 
-        dataCenterX = (minX + maxX) / 2f;
-        dataCenterY = (minY + maxY) / 2f;
+        // Calles
+        for (Road road : roads) {
+
+            float[] points = road.points;
+
+            for (int i = 0; i < points.length; i += 2) {
+
+                float x = points[i];
+                float y = points[i + 1];
+
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+
+                found = true;
+            }
+        }
+
+        if (!found) {
+            return;
+        }
+
+        dataCenterX =
+                (minX + maxX) / 2f;
+
+        dataCenterY =
+                (minY + maxY) / 2f;
     }
+
+    // =========================================================
+    // ESCALA INICIAL
+    // =========================================================
 
     @Override
     protected void onSizeChanged(
@@ -103,6 +248,7 @@ public class PolygonMapView extends View {
             int oldWidth,
             int oldHeight
     ) {
+
         super.onSizeChanged(
                 width,
                 height,
@@ -110,7 +256,10 @@ public class PolygonMapView extends View {
                 oldHeight
         );
 
-        calculateInitialScale(width, height);
+        calculateInitialScale(
+                width,
+                height
+        );
     }
 
     private void calculateInitialScale(
@@ -145,30 +294,51 @@ public class PolygonMapView extends View {
             }
         }
 
-        float dataWidth = maxX - minX;
-        float dataHeight = maxY - minY;
+        float dataWidth =
+                maxX - minX;
 
-        if (dataWidth <= 0 || dataHeight <= 0) {
+        float dataHeight =
+                maxY - minY;
+
+        if (dataWidth <= 0 ||
+                dataHeight <= 0) {
             return;
         }
 
-        // Dejamos margen alrededor del mapa.
-        float availableWidth = width * 0.88f;
-        float availableHeight = height * 0.72f;
+        float availableWidth =
+                width * 0.88f;
 
-        float scaleX = availableWidth / dataWidth;
-        float scaleY = availableHeight / dataHeight;
+        float availableHeight =
+                height * 0.72f;
 
-        initialScale = Math.min(scaleX, scaleY);
+        float scaleX =
+                availableWidth / dataWidth;
 
-        mapScale = initialScale;
+        float scaleY =
+                availableHeight / dataHeight;
+
+        initialScale =
+                Math.min(
+                        scaleX,
+                        scaleY
+                );
+
+        mapScale =
+                initialScale;
     }
+
+    // =========================================================
+    // DIBUJADO
+    // =========================================================
 
     @Override
     protected void onDraw(Canvas canvas) {
+
         super.onDraw(canvas);
 
-        backgroundPaint.setColor(0xFF05060B);
+        backgroundPaint.setColor(
+                0xFF05060B
+        );
 
         canvas.drawRect(
                 0,
@@ -178,15 +348,14 @@ public class PolygonMapView extends View {
                 backgroundPaint
         );
 
-        // =========================
-        // MAPA
-        // =========================
-
         canvas.save();
 
         canvas.translate(
-                getWidth() / 2f + mapOffsetX,
-                getHeight() / 2f + mapOffsetY
+                getWidth() / 2f +
+                        mapOffsetX,
+
+                getHeight() / 2f +
+                        mapOffsetY
         );
 
         canvas.scale(
@@ -194,21 +363,154 @@ public class PolygonMapView extends View {
                 mapScale
         );
 
-        // Centramos los datos reales
         canvas.translate(
                 -dataCenterX,
                 -dataCenterY
         );
 
-        drawRealSectors(canvas);
+        // Primero las calles
+        drawRoads(canvas);
+
+        // Después los sectores
+        drawSectors(canvas);
 
         canvas.restore();
 
-        // =========================
-        // ENCABEZADO
-        // =========================
+        drawHeader(canvas);
+    }
 
-        titlePaint.setColor(0xFFFFFFFF);
+    private void drawRoads(Canvas canvas) {
+
+        for (Road road : roads) {
+
+            if (road.type.equals("motorway") ||
+                    road.type.equals("trunk") ||
+                    road.type.equals("primary") ||
+                    road.type.equals("secondary")) {
+
+                roadPaint.setColor(
+                        0xFF78818F
+                );
+
+                roadPaint.setStrokeWidth(
+                        3.0f
+                );
+
+            } else if (
+                    road.type.equals("tertiary")
+            ) {
+
+                roadPaint.setColor(
+                        0xFF555D69
+                );
+
+                roadPaint.setStrokeWidth(
+                        2.2f
+                );
+
+            } else {
+
+                roadPaint.setColor(
+                        0xFF303640
+                );
+
+                roadPaint.setStrokeWidth(
+                        1.15f
+                );
+            }
+
+            float[] points =
+                    road.points;
+
+            if (points.length < 4) {
+                continue;
+            }
+
+            path.reset();
+
+            path.moveTo(
+                    points[0],
+                    points[1]
+            );
+
+            for (
+                    int i = 2;
+                    i < points.length;
+                    i += 2
+            ) {
+
+                path.lineTo(
+                        points[i],
+                        points[i + 1]
+                );
+            }
+
+            canvas.drawPath(
+                    path,
+                    roadPaint
+            );
+        }
+    }
+
+    private void drawSectors(Canvas canvas) {
+
+        sectorPaint.setStyle(
+                Paint.Style.STROKE
+        );
+
+        sectorPaint.setStrokeWidth(
+                1.6f
+        );
+
+        sectorPaint.setColor(
+                0xFF3E4652
+        );
+
+        for (
+                SectorManager.Sector sector :
+                sectors
+        ) {
+
+            float[] points =
+                    sector.points;
+
+            if (points.length < 6) {
+                continue;
+            }
+
+            path.reset();
+
+            path.moveTo(
+                    points[0],
+                    points[1]
+            );
+
+            for (
+                    int i = 2;
+                    i < points.length;
+                    i += 2
+            ) {
+
+                path.lineTo(
+                        points[i],
+                        points[i + 1]
+                );
+            }
+
+            path.close();
+
+            canvas.drawPath(
+                    path,
+                    sectorPaint
+            );
+        }
+    }
+
+    private void drawHeader(Canvas canvas) {
+
+        titlePaint.setColor(
+                0xFFFFFFFF
+        );
 
         titlePaint.setTypeface(
                 Typeface.create(
@@ -217,7 +519,9 @@ public class PolygonMapView extends View {
                 )
         );
 
-        titlePaint.setTextSize(28);
+        titlePaint.setTextSize(
+                28
+        );
 
         canvas.drawText(
                 "POLYGON",
@@ -233,7 +537,9 @@ public class PolygonMapView extends View {
                 )
         );
 
-        titlePaint.setTextSize(15);
+        titlePaint.setTextSize(
+                15
+        );
 
         canvas.drawText(
                 "El Tigre",
@@ -243,73 +549,50 @@ public class PolygonMapView extends View {
         );
     }
 
-    private void drawRealSectors(Canvas canvas) {
-
-        hexPaint.setStyle(Paint.Style.STROKE);
-        hexPaint.setStrokeWidth(2.0f);
-        hexPaint.setColor(0xFF4A4F5A);
-
-        for (SectorManager.Sector sector : sectors) {
-
-            float[] points = sector.points;
-
-            if (points.length < 6) {
-                continue;
-            }
-
-            hexPath.reset();
-
-            for (int i = 0; i < points.length; i += 2) {
-
-                float x = points[i];
-                float y = points[i + 1];
-
-                if (i == 0) {
-                    hexPath.moveTo(x, y);
-                } else {
-                    hexPath.lineTo(x, y);
-                }
-            }
-
-            hexPath.close();
-
-            canvas.drawPath(
-                    hexPath,
-                    hexPaint
-            );
-        }
-    }
-
-    // =========================
+    // =========================================================
     // GESTOS
-    // =========================
+    // =========================================================
 
     @Override
-    public boolean onTouchEvent(MotionEvent event) {
+    public boolean onTouchEvent(
+            MotionEvent event
+    ) {
 
-        switch (event.getActionMasked()) {
+        switch (
+                event.getActionMasked()
+        ) {
 
             case MotionEvent.ACTION_DOWN:
 
                 dragging = true;
                 zooming = false;
 
-                lastX = event.getX();
-                lastY = event.getY();
+                lastX =
+                        event.getX();
+
+                lastY =
+                        event.getY();
 
                 return true;
 
             case MotionEvent.ACTION_POINTER_DOWN:
 
-                if (event.getPointerCount() >= 2) {
+                if (
+                        event.getPointerCount()
+                                >= 2
+                ) {
 
                     dragging = false;
                     zooming = true;
 
-                    lastDistance = distance(event);
+                    lastDistance =
+                            distance(event);
 
-                    lastMidX = midpointX(event);
-                    lastMidY = midpointY(event);
+                    lastMidX =
+                            midpointX(event);
+
+                    lastMidY =
+                            midpointY(event);
                 }
 
                 return true;
@@ -318,27 +601,34 @@ public class PolygonMapView extends View {
 
                 if (
                         zooming &&
-                        event.getPointerCount() >= 2
+                        event.getPointerCount()
+                                >= 2
                 ) {
 
                     float newDistance =
                             distance(event);
 
-                    if (lastDistance > 0) {
+                    if (
+                            lastDistance > 0
+                    ) {
 
-                        float scaleFactor =
+                        float factor =
                                 newDistance /
-                                lastDistance;
+                                        lastDistance;
 
-                        mapScale *= scaleFactor;
+                        mapScale *= factor;
 
-                        mapScale = Math.max(
-                                initialScale * MIN_ZOOM,
-                                Math.min(
-                                        initialScale * MAX_ZOOM,
-                                        mapScale
-                                )
-                        );
+                        mapScale =
+                                Math.max(
+                                        initialScale *
+                                                MIN_ZOOM,
+
+                                        Math.min(
+                                                initialScale *
+                                                        MAX_ZOOM,
+                                                mapScale
+                                        )
+                                );
                     }
 
                     float newMidX =
@@ -348,14 +638,21 @@ public class PolygonMapView extends View {
                             midpointY(event);
 
                     mapOffsetX +=
-                            newMidX - lastMidX;
+                            newMidX -
+                                    lastMidX;
 
                     mapOffsetY +=
-                            newMidY - lastMidY;
+                            newMidY -
+                                    lastMidY;
 
-                    lastDistance = newDistance;
-                    lastMidX = newMidX;
-                    lastMidY = newMidY;
+                    lastDistance =
+                            newDistance;
+
+                    lastMidX =
+                            newMidX;
+
+                    lastMidY =
+                            newMidY;
 
                     invalidate();
 
@@ -364,11 +661,15 @@ public class PolygonMapView extends View {
 
                 if (
                         dragging &&
-                        event.getPointerCount() == 1
+                        event.getPointerCount()
+                                == 1
                 ) {
 
-                    float x = event.getX();
-                    float y = event.getY();
+                    float x =
+                            event.getX();
+
+                    float y =
+                            event.getY();
 
                     mapOffsetX +=
                             x - lastX;
@@ -405,39 +706,48 @@ public class PolygonMapView extends View {
         return true;
     }
 
-    private float distance(MotionEvent event) {
+    private float distance(
+            MotionEvent event
+    ) {
 
-        if (event.getPointerCount() < 2) {
+        if (
+                event.getPointerCount()
+                        < 2
+        ) {
             return 0f;
         }
 
         float dx =
                 event.getX(0) -
-                event.getX(1);
+                        event.getX(1);
 
         float dy =
                 event.getY(0) -
-                event.getY(1);
+                        event.getY(1);
 
         return (float) Math.sqrt(
                 dx * dx +
-                dy * dy
+                        dy * dy
         );
     }
 
-    private float midpointX(MotionEvent event) {
+    private float midpointX(
+            MotionEvent event
+    ) {
 
         return (
                 event.getX(0) +
-                event.getX(1)
+                        event.getX(1)
         ) / 2f;
     }
 
-    private float midpointY(MotionEvent event) {
+    private float midpointY(
+            MotionEvent event
+    ) {
 
         return (
                 event.getY(0) +
-                event.getY(1)
+                        event.getY(1)
         ) / 2f;
     }
-}
+            }
