@@ -21,10 +21,17 @@ public class PolygonMapView extends View {
     private final SectorManager sectorManager;
     private final List<SectorManager.Sector> sectors;
 
+    // Transformación del mapa
     private float mapOffsetX = 0f;
     private float mapOffsetY = 0f;
     private float mapScale = 1f;
 
+    // Centro y escala de la geometría real
+    private float dataCenterX = 0f;
+    private float dataCenterY = 0f;
+    private float initialScale = 1f;
+
+    // Gestos
     private float lastX;
     private float lastY;
 
@@ -34,6 +41,9 @@ public class PolygonMapView extends View {
 
     private boolean dragging = false;
     private boolean zooming = false;
+
+    private static final float MIN_ZOOM = 0.35f;
+    private static final float MAX_ZOOM = 5.0f;
 
     public PolygonMapView(Context context) {
         super(context);
@@ -49,6 +59,109 @@ public class PolygonMapView extends View {
 
         titlePaint.setTextAlign(Paint.Align.CENTER);
         titlePaint.setAntiAlias(true);
+
+        calculateDataBounds();
+    }
+
+    private void calculateDataBounds() {
+
+        if (sectors.isEmpty()) {
+            return;
+        }
+
+        float minX = Float.MAX_VALUE;
+        float minY = Float.MAX_VALUE;
+
+        float maxX = -Float.MAX_VALUE;
+        float maxY = -Float.MAX_VALUE;
+
+        for (SectorManager.Sector sector : sectors) {
+
+            float[] points = sector.points;
+
+            for (int i = 0; i < points.length; i += 2) {
+
+                float x = points[i];
+                float y = points[i + 1];
+
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+        }
+
+        dataCenterX = (minX + maxX) / 2f;
+        dataCenterY = (minY + maxY) / 2f;
+    }
+
+    @Override
+    protected void onSizeChanged(
+            int width,
+            int height,
+            int oldWidth,
+            int oldHeight
+    ) {
+        super.onSizeChanged(
+                width,
+                height,
+                oldWidth,
+                oldHeight
+        );
+
+        calculateInitialScale(width, height);
+    }
+
+    private void calculateInitialScale(
+            int width,
+            int height
+    ) {
+
+        if (sectors.isEmpty()) {
+            return;
+        }
+
+        float minX = Float.MAX_VALUE;
+        float minY = Float.MAX_VALUE;
+
+        float maxX = -Float.MAX_VALUE;
+        float maxY = -Float.MAX_VALUE;
+
+        for (SectorManager.Sector sector : sectors) {
+
+            float[] points = sector.points;
+
+            for (int i = 0; i < points.length; i += 2) {
+
+                float x = points[i];
+                float y = points[i + 1];
+
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+        }
+
+        float dataWidth = maxX - minX;
+        float dataHeight = maxY - minY;
+
+        if (dataWidth <= 0 || dataHeight <= 0) {
+            return;
+        }
+
+        // Dejamos margen alrededor del mapa.
+        float availableWidth = width * 0.88f;
+        float availableHeight = height * 0.72f;
+
+        float scaleX = availableWidth / dataWidth;
+        float scaleY = availableHeight / dataHeight;
+
+        initialScale = Math.min(scaleX, scaleY);
+
+        mapScale = initialScale;
     }
 
     @Override
@@ -66,7 +179,7 @@ public class PolygonMapView extends View {
         );
 
         // =========================
-        // MAPA REAL
+        // MAPA
         // =========================
 
         canvas.save();
@@ -76,7 +189,16 @@ public class PolygonMapView extends View {
                 getHeight() / 2f + mapOffsetY
         );
 
-        canvas.scale(mapScale, mapScale);
+        canvas.scale(
+                mapScale,
+                mapScale
+        );
+
+        // Centramos los datos reales
+        canvas.translate(
+                -dataCenterX,
+                -dataCenterY
+        );
 
         drawRealSectors(canvas);
 
@@ -87,9 +209,14 @@ public class PolygonMapView extends View {
         // =========================
 
         titlePaint.setColor(0xFFFFFFFF);
+
         titlePaint.setTypeface(
-                Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                Typeface.create(
+                        Typeface.DEFAULT,
+                        Typeface.BOLD
+                )
         );
+
         titlePaint.setTextSize(28);
 
         canvas.drawText(
@@ -100,8 +227,12 @@ public class PolygonMapView extends View {
         );
 
         titlePaint.setTypeface(
-                Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+                Typeface.create(
+                        Typeface.DEFAULT,
+                        Typeface.NORMAL
+                )
         );
+
         titlePaint.setTextSize(15);
 
         canvas.drawText(
@@ -185,25 +316,36 @@ public class PolygonMapView extends View {
 
             case MotionEvent.ACTION_MOVE:
 
-                if (zooming && event.getPointerCount() >= 2) {
+                if (
+                        zooming &&
+                        event.getPointerCount() >= 2
+                ) {
 
-                    float newDistance = distance(event);
+                    float newDistance =
+                            distance(event);
 
                     if (lastDistance > 0) {
 
                         float scaleFactor =
-                                newDistance / lastDistance;
+                                newDistance /
+                                lastDistance;
 
                         mapScale *= scaleFactor;
 
                         mapScale = Math.max(
-                                0.45f,
-                                Math.min(4.0f, mapScale)
+                                initialScale * MIN_ZOOM,
+                                Math.min(
+                                        initialScale * MAX_ZOOM,
+                                        mapScale
+                                )
                         );
                     }
 
-                    float newMidX = midpointX(event);
-                    float newMidY = midpointY(event);
+                    float newMidX =
+                            midpointX(event);
+
+                    float newMidY =
+                            midpointY(event);
 
                     mapOffsetX +=
                             newMidX - lastMidX;
@@ -220,14 +362,19 @@ public class PolygonMapView extends View {
                     return true;
                 }
 
-                if (dragging &&
-                        event.getPointerCount() == 1) {
+                if (
+                        dragging &&
+                        event.getPointerCount() == 1
+                ) {
 
                     float x = event.getX();
                     float y = event.getY();
 
-                    mapOffsetX += x - lastX;
-                    mapOffsetY += y - lastY;
+                    mapOffsetX +=
+                            x - lastX;
+
+                    mapOffsetY +=
+                            y - lastY;
 
                     lastX = x;
                     lastY = y;
@@ -265,13 +412,16 @@ public class PolygonMapView extends View {
         }
 
         float dx =
-                event.getX(0) - event.getX(1);
+                event.getX(0) -
+                event.getX(1);
 
         float dy =
-                event.getY(0) - event.getY(1);
+                event.getY(0) -
+                event.getY(1);
 
         return (float) Math.sqrt(
-                dx * dx + dy * dy
+                dx * dx +
+                dy * dy
         );
     }
 
