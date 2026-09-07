@@ -69,33 +69,22 @@ public class PolygonMapView extends View {
     private boolean dragging = false;
     private boolean zooming = false;
 
-    private static final float MIN_ZOOM = 0.35f;
+    private static final float MIN_ZOOM = 1.0f;
     private static final float MAX_ZOOM = 10.0f;
 
     /*
-     * LOD is based on zoom relative to the initial map fit.
+     * LOD is based on zoom relative to the initial map view.
      *
-     * < 0.55 : sectors only
-     * 0.55-0.90 : main roads
-     * 0.90-1.80 : main + tertiary
-     * > 1.80 : all roads
-     */
-    private static final float LOD_MAIN_ROADS = 0.55f;
-    private static final float LOD_TERTIARY = 0.90f;
-    private static final float LOD_ALL_ROADS = 1.80f;
-
-    /*
-     * Known out-of-map road fragments visible in the source dataset.
-     * These are intentionally expressed in data coordinates so the cleanup
-     * remains stable regardless of screen size or zoom.
+     * 1.00-2.20 : only important roads
+     * 2.20-3.50 : important + tertiary roads
+     * > 3.50     : all roads, including small residential streets
      *
-     * Each zone is: left, top, right, bottom.
+     * The idea is deliberately conservative: small streets should appear
+     * only after the user has intentionally zoomed in.
      */
-    private static final float[][] EXCLUDED_ROAD_ZONES = {
-            {-130f, 530f, 90f, 770f},
-            {170f, 780f, 410f, 1045f},
-            {900f, 650f, 1515f, 1280f}
-    };
+    private static final float LOD_MAIN_ROADS = 1.00f;
+    private static final float LOD_TERTIARY = 2.20f;
+    private static final float LOD_ALL_ROADS = 3.50f;
 
     private static final Set<String> LABEL_TYPES = new HashSet<>();
 
@@ -389,37 +378,16 @@ public class PolygonMapView extends View {
                 if (points.length >= 4) {
                     Road road = new Road(type, name, points);
 
-                    // Remove isolated road fragments that unnecessarily expand
-                    // the map bounds and are outside the useful city area.
-                    if (!isExcludedRoad(road)) {
-                        roads.add(road);
-                    }
+                    // Keep the OSM geometry intact.
+                    // The viewport/zoom system controls what is visible;
+                    // we do not alter or crop the source road dataset here.
+                    roads.add(road);
                 }
             }
 
         } catch (Exception e) {
             e.printStackTrace();
         }
-    }
-
-    private boolean isExcludedRoad(Road road) {
-        if (road.bounds.width() <= 0f || road.bounds.height() <= 0f) {
-            return false;
-        }
-
-        float centerX = (road.bounds.left + road.bounds.right) * 0.5f;
-        float centerY = (road.bounds.top + road.bounds.bottom) * 0.5f;
-
-        for (float[] zone : EXCLUDED_ROAD_ZONES) {
-            if (centerX >= zone[0] &&
-                    centerX <= zone[2] &&
-                    centerY >= zone[1] &&
-                    centerY <= zone[3]) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private void calculateDataBounds() {
@@ -648,15 +616,16 @@ public class PolygonMapView extends View {
         float dataWidth = dataMaxX - dataMinX;
         float dataHeight = dataMaxY - dataMinY;
 
-        float availableWidth = width * 0.88f;
-        float availableHeight = height * 0.72f;
+        // The opening view is also the furthest zoom-out allowed.
+        // Keep a little breathing room around the map without letting the
+        // user zoom so far out that the city becomes a tiny speck.
+        float availableWidth = width * 0.92f;
+        float availableHeight = height * 0.68f;
 
         float scaleX = availableWidth / dataWidth;
         float scaleY = availableHeight / dataHeight;
 
-        // Start slightly closer than a strict fit so the city is immediately
-        // readable without requiring the first pinch gesture.
-        initialScale = Math.min(scaleX, scaleY) * 1.10f;
+        initialScale = Math.min(scaleX, scaleY);
 
         if (initialScale <= 0f || Float.isNaN(initialScale)) {
             return;
@@ -707,7 +676,7 @@ public class PolygonMapView extends View {
         }
 
         // Labels use a separate, more conservative LOD.
-        if (zoomRatio >= 0.85f) {
+        if (zoomRatio >= 1.20f) {
             drawRoadLabels(canvas, visible, zoomRatio);
         }
 
@@ -764,9 +733,9 @@ public class PolygonMapView extends View {
 
             /*
              * LOD:
-             * 0.55-0.90 -> motorway/trunk/primary/secondary
-             * 0.90-1.80 -> + tertiary
-             * >1.80      -> all roads
+             * 1.00-2.20 -> motorway/trunk/primary/secondary
+             * 2.20-3.50 -> + tertiary
+             * >3.50      -> all roads
              */
             if (zoomRatio < LOD_TERTIARY && priority < 2) {
                 continue;
@@ -829,9 +798,9 @@ public class PolygonMapView extends View {
          */
         float labelDensity;
 
-        if (zoomRatio < 1.10f) {
+        if (zoomRatio < 1.60f) {
             labelDensity = 0.72f;
-        } else if (zoomRatio < 1.80f) {
+        } else if (zoomRatio < 2.60f) {
             labelDensity = 0.88f;
         } else {
             labelDensity = 1.0f;
@@ -841,9 +810,9 @@ public class PolygonMapView extends View {
 
         float textSizePx;
 
-        if (zoomRatio < 1.10f) {
+        if (zoomRatio < 1.60f) {
             textSizePx = 9f;
-        } else if (zoomRatio < 1.80f) {
+        } else if (zoomRatio < 2.60f) {
             textSizePx = 9.5f;
         } else {
             textSizePx = 10f;
@@ -853,10 +822,10 @@ public class PolygonMapView extends View {
 
         int maxLabels;
 
-        if (zoomRatio < 1.10f) {
-            maxLabels = 14;
-        } else if (zoomRatio < 1.80f) {
-            maxLabels = 24;
+        if (zoomRatio < 1.60f) {
+            maxLabels = 12;
+        } else if (zoomRatio < 2.60f) {
+            maxLabels = 20;
         } else {
             maxLabels = 40;
         }
