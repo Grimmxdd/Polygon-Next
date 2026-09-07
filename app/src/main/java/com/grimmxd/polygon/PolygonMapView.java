@@ -32,7 +32,6 @@ public class PolygonMapView extends View {
     private final Paint roadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint sectorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint roadLabelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint titlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final SectorManager sectorManager;
     private final List<SectorManager.Sector> sectors;
@@ -336,8 +335,6 @@ public class PolygonMapView extends View {
         roadLabelPaint.setColor(0xA8E9EDF2);
         roadLabelPaint.setTextSize(10f);
 
-        titlePaint.setTextAlign(Paint.Align.CENTER);
-        titlePaint.setAntiAlias(true);
     }
 
     private void loadRoads(Context context) {
@@ -658,7 +655,6 @@ public class PolygonMapView extends View {
         canvas.drawRect(0, 0, getWidth(), getHeight(), backgroundPaint);
 
         if (mapScale <= 0f) {
-            drawHeader(canvas);
             return;
         }
 
@@ -690,7 +686,6 @@ public class PolygonMapView extends View {
 
         canvas.restore();
 
-        drawHeader(canvas);
     }
 
     private RectF getVisibleDataRect() {
@@ -945,33 +940,6 @@ public class PolygonMapView extends View {
         }
 
         return true;
-    }
-
-    private void drawHeader(Canvas canvas) {
-        titlePaint.setColor(0xFFFFFFFF);
-        titlePaint.setTypeface(
-                Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        );
-        titlePaint.setTextSize(28f);
-
-        canvas.drawText(
-                "POLYGON",
-                getWidth() / 2f,
-                105f,
-                titlePaint
-        );
-
-        titlePaint.setTypeface(
-                Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-        );
-        titlePaint.setTextSize(15f);
-
-        canvas.drawText(
-                "El Tigre",
-                getWidth() / 2f,
-                130f,
-                titlePaint
-        );
     }
 
     @Override
