@@ -83,8 +83,8 @@ public class PolygonMapView extends View {
      * only after the user has intentionally zoomed in.
      */
     private static final float LOD_MAIN_ROADS = 1.00f;
-    private static final float LOD_TERTIARY = 4.00f;
-    private static final float LOD_ALL_ROADS = 7.50f;
+    private static final float LOD_TERTIARY = 3.00f;
+    private static final float LOD_ALL_ROADS = 5.75f;
 
     private static final Set<String> LABEL_TYPES = new HashSet<>();
 
@@ -635,6 +635,11 @@ public class PolygonMapView extends View {
         }
 
         mapScale = initialScale;
+
+        // Opening position: slightly left and upward, matching the
+        // composition requested from the reference screenshot.
+        mapOffsetX = -110f;
+        mapOffsetY = -55f;
     }
 
     private float getZoomRatio() {
@@ -736,9 +741,9 @@ public class PolygonMapView extends View {
 
             /*
              * LOD:
-             * 1.00-2.20 -> motorway/trunk/primary/secondary
-             * 2.20-3.50 -> + tertiary
-             * >3.50      -> all roads
+             * 1.00-3.00 -> motorway/trunk/primary/secondary
+             * 3.00-5.75 -> + tertiary
+             * >5.75      -> all roads
              */
             if (zoomRatio < LOD_TERTIARY && priority < 2) {
                 continue;
