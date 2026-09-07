@@ -75,16 +75,16 @@ public class PolygonMapView extends View {
     /*
      * LOD is based on zoom relative to the initial map view.
      *
-     * 1.00-2.20 : only important roads
-     * 2.20-3.50 : important + tertiary roads
-     * > 3.50     : all roads, including small residential streets
+     * 1.00-4.00 : only important roads
+     * 4.00-7.50 : important + tertiary roads
+     * > 7.50     : all roads, including small residential streets
      *
      * The idea is deliberately conservative: small streets should appear
      * only after the user has intentionally zoomed in.
      */
     private static final float LOD_MAIN_ROADS = 1.00f;
-    private static final float LOD_TERTIARY = 2.20f;
-    private static final float LOD_ALL_ROADS = 3.50f;
+    private static final float LOD_TERTIARY = 4.00f;
+    private static final float LOD_ALL_ROADS = 7.50f;
 
     private static final Set<String> LABEL_TYPES = new HashSet<>();
 
@@ -625,7 +625,10 @@ public class PolygonMapView extends View {
         float scaleX = availableWidth / dataWidth;
         float scaleY = availableHeight / dataHeight;
 
-        initialScale = Math.min(scaleX, scaleY);
+        // Start already zoomed in 5x relative to the full-data fit.
+        // This opening view becomes the new minimum zoom-out level.
+        float fitScale = Math.min(scaleX, scaleY);
+        initialScale = fitScale * 5.0f;
 
         if (initialScale <= 0f || Float.isNaN(initialScale)) {
             return;
@@ -676,7 +679,7 @@ public class PolygonMapView extends View {
         }
 
         // Labels use a separate, more conservative LOD.
-        if (zoomRatio >= 1.20f) {
+        if (zoomRatio >= 2.50f) {
             drawRoadLabels(canvas, visible, zoomRatio);
         }
 
@@ -798,9 +801,9 @@ public class PolygonMapView extends View {
          */
         float labelDensity;
 
-        if (zoomRatio < 1.60f) {
+        if (zoomRatio < 3.00f) {
             labelDensity = 0.72f;
-        } else if (zoomRatio < 2.60f) {
+        } else if (zoomRatio < 5.50f) {
             labelDensity = 0.88f;
         } else {
             labelDensity = 1.0f;
@@ -810,9 +813,9 @@ public class PolygonMapView extends View {
 
         float textSizePx;
 
-        if (zoomRatio < 1.60f) {
+        if (zoomRatio < 3.00f) {
             textSizePx = 9f;
-        } else if (zoomRatio < 2.60f) {
+        } else if (zoomRatio < 5.50f) {
             textSizePx = 9.5f;
         } else {
             textSizePx = 10f;
@@ -822,9 +825,9 @@ public class PolygonMapView extends View {
 
         int maxLabels;
 
-        if (zoomRatio < 1.60f) {
+        if (zoomRatio < 3.00f) {
             maxLabels = 12;
-        } else if (zoomRatio < 2.60f) {
+        } else if (zoomRatio < 5.50f) {
             maxLabels = 20;
         } else {
             maxLabels = 40;
