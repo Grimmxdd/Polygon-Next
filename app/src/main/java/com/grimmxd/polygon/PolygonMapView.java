@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PathMeasure;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.view.MotionEvent;
@@ -16,9 +17,13 @@ import org.json.JSONObject;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 public class PolygonMapView extends View {
@@ -29,12 +34,16 @@ public class PolygonMapView extends View {
     private final Paint roadLabelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint titlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-    private final Path reusablePath = new Path();
-
     private final SectorManager sectorManager;
     private final List<SectorManager.Sector> sectors;
     private final List<Road> roads = new ArrayList<>();
     private final List<RoadLabel> roadLabels = new ArrayList<>();
+
+    private final SpatialGrid<Road> roadGrid = new SpatialGrid<>();
+    private final SpatialGrid<SectorManager.Sector> sectorGrid = new SpatialGrid<>();
+
+    // Reused label collision rectangles. No per-frame RectF allocations.
+    private final ArrayList<RectF> occupiedLabelBounds = new ArrayList<>();
 
     private float mapOffsetX = 0f;
     private float mapOffsetY = 0f;
@@ -42,6 +51,11 @@ public class PolygonMapView extends View {
 
     private float dataCenterX = 0f;
     private float dataCenterY = 0f;
+    private float dataMinX = 0f;
+    private float dataMinY = 0f;
+    private float dataMaxX = 0f;
+    private float dataMaxY = 0f;
+
     private float initialScale = 1f;
 
     private float lastX;
@@ -57,7 +71,18 @@ public class PolygonMapView extends View {
     private static final float MIN_ZOOM = 0.35f;
     private static final float MAX_ZOOM = 5.0f;
 
-    // Only major named roads receive labels.
+    /*
+     * LOD is based on zoom relative to the initial map fit.
+     *
+     * < 0.55 : sectors only
+     * 0.55-0.90 : main roads
+     * 0.90-1.80 : main + tertiary
+     * > 1.80 : all roads
+     */
+    private static final float LOD_MAIN_ROADS = 0.55f;
+    private static final float LOD_TERTIARY = 0.90f;
+    private static final float LOD_ALL_ROADS = 1.80f;
+
     private static final Set<String> LABEL_TYPES = new HashSet<>();
 
     static {
@@ -80,11 +105,22 @@ public class PolygonMapView extends View {
 
             if (points.length >= 4) {
                 path.moveTo(points[0], points[1]);
+
                 for (int i = 2; i < points.length; i += 2) {
                     path.lineTo(points[i], points[i + 1]);
                 }
+
                 path.computeBounds(bounds, true);
             }
+        }
+
+        int priority() {
+            if ("motorway".equals(type)) return 5;
+            if ("trunk".equals(type)) return 4;
+            if ("primary".equals(type)) return 3;
+            if ("secondary".equals(type)) return 2;
+            if ("tertiary".equals(type)) return 1;
+            return 0;
         }
     }
 
@@ -94,15 +130,172 @@ public class PolygonMapView extends View {
         final float y;
         final float angleDegrees;
         final float length;
+        final int priority;
 
-        RoadLabel(String name, float x, float y, float angleDegrees, float length) {
+        RoadLabel(
+                String name,
+                float x,
+                float y,
+                float angleDegrees,
+                float length,
+                int priority
+        ) {
             this.name = name;
             this.x = x;
             this.y = y;
             this.angleDegrees = angleDegrees;
             this.length = length;
+            this.priority = priority;
         }
     }
+
+    /**
+     * Small in-memory spatial index.
+     * It behaves like internal map tiles: only objects in cells touched by
+     * the visible rectangle are considered for drawing.
+     */
+    private static class SpatialGrid<T> {
+
+        private final Map<Long, ArrayList<T>> cells = new HashMap<>();
+        private final ArrayList<T> results = new ArrayList<>();
+        private final HashSet<T> seen = new HashSet<>();
+
+        private float minX;
+        private float minY;
+        private float maxX;
+        private float maxY;
+        private float cellWidth;
+        private float cellHeight;
+        private int columns;
+        private int rows;
+        private boolean ready = false;
+
+        void build(
+                List<T> objects,
+                float minX,
+                float minY,
+                float maxX,
+                float maxY,
+                int columns,
+                int rows,
+                BoundsProvider<T> provider
+        ) {
+            cells.clear();
+            results.clear();
+            seen.clear();
+
+            this.minX = minX;
+            this.minY = minY;
+            this.maxX = maxX;
+            this.maxY = maxY;
+            this.columns = Math.max(1, columns);
+            this.rows = Math.max(1, rows);
+
+            float width = Math.max(1f, maxX - minX);
+            float height = Math.max(1f, maxY - minY);
+
+            cellWidth = width / this.columns;
+            cellHeight = height / this.rows;
+
+            for (T object : objects) {
+                RectF b = provider.bounds(object);
+
+                int startX = cellX(b.left);
+                int endX = cellX(b.right);
+                int startY = cellY(b.top);
+                int endY = cellY(b.bottom);
+
+                for (int y = startY; y <= endY; y++) {
+                    for (int x = startX; x <= endX; x++) {
+                        long key = key(x, y);
+                        ArrayList<T> list = cells.get(key);
+
+                        if (list == null) {
+                            list = new ArrayList<>();
+                            cells.put(key, list);
+                        }
+
+                        list.add(object);
+                    }
+                }
+            }
+
+            ready = true;
+        }
+
+        ArrayList<T> query(RectF visible, BoundsProvider<T> provider) {
+            results.clear();
+            seen.clear();
+
+            if (!ready) {
+                return results;
+            }
+
+            int startX = cellX(visible.left);
+            int endX = cellX(visible.right);
+            int startY = cellY(visible.top);
+            int endY = cellY(visible.bottom);
+
+            for (int y = startY; y <= endY; y++) {
+                for (int x = startX; x <= endX; x++) {
+                    ArrayList<T> list = cells.get(key(x, y));
+
+                    if (list == null) {
+                        continue;
+                    }
+
+                    for (T object : list) {
+                        if (seen.add(object) &&
+                                RectF.intersects(provider.bounds(object), visible)) {
+                            results.add(object);
+                        }
+                    }
+                }
+            }
+
+            return results;
+        }
+
+        private int cellX(float x) {
+            if (x <= minX) return 0;
+            if (x >= maxX) return columns - 1;
+
+            int value = (int) ((x - minX) / cellWidth);
+            return Math.max(0, Math.min(columns - 1, value));
+        }
+
+        private int cellY(float y) {
+            if (y <= minY) return 0;
+            if (y >= maxY) return rows - 1;
+
+            int value = (int) ((y - minY) / cellHeight);
+            return Math.max(0, Math.min(rows - 1, value));
+        }
+
+        private long key(int x, int y) {
+            return (((long) y) << 32) ^ (x & 0xffffffffL);
+        }
+    }
+
+    private interface BoundsProvider<T> {
+        RectF bounds(T object);
+    }
+
+    private static final BoundsProvider<Road> ROAD_BOUNDS_PROVIDER =
+            new BoundsProvider<Road>() {
+                @Override
+                public RectF bounds(Road object) {
+                    return object.bounds;
+                }
+            };
+
+    private static final BoundsProvider<SectorManager.Sector> SECTOR_BOUNDS_PROVIDER =
+            new BoundsProvider<SectorManager.Sector>() {
+                @Override
+                public RectF bounds(SectorManager.Sector object) {
+                    return object.bounds;
+                }
+            };
 
     public PolygonMapView(Context context) {
         super(context);
@@ -115,6 +308,7 @@ public class PolygonMapView extends View {
 
         loadRoads(context);
         calculateDataBounds();
+        buildSpatialIndexes();
         buildRoadLabels();
 
         roadPaint.setStyle(Paint.Style.STROKE);
@@ -127,20 +321,25 @@ public class PolygonMapView extends View {
         sectorPaint.setColor(0x553E4652);
         sectorPaint.setAntiAlias(true);
 
+        /*
+         * Smaller, softer and translucent road labels.
+         * The collision system below prevents labels from stacking over each other.
+         */
         roadLabelPaint.setTypeface(
                 Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         );
         roadLabelPaint.setTextAlign(Paint.Align.CENTER);
         roadLabelPaint.setAntiAlias(true);
-        roadLabelPaint.setColor(0xBDE9EDF2);
-        roadLabelPaint.setTextSize(12f);
+        roadLabelPaint.setColor(0xA8E9EDF2);
+        roadLabelPaint.setTextSize(10f);
 
         titlePaint.setTextAlign(Paint.Align.CENTER);
         titlePaint.setAntiAlias(true);
     }
 
     private void loadRoads(Context context) {
-        try (InputStream input = context.getAssets().open("roads_el_tigre.json")) {
+        try {
+            InputStream input = context.getAssets().open("roads_el_tigre.json");
 
             byte[] bytes = new byte[input.available()];
             int offset = 0;
@@ -150,6 +349,8 @@ public class PolygonMapView extends View {
                     (read = input.read(bytes, offset, bytes.length - offset)) > 0) {
                 offset += read;
             }
+
+            input.close();
 
             String json = new String(bytes, StandardCharsets.UTF_8);
             JSONObject root = new JSONObject(json);
@@ -166,6 +367,7 @@ public class PolygonMapView extends View {
 
                 for (int p = 0; p < pointArray.length(); p++) {
                     JSONArray point = pointArray.getJSONArray(p);
+
                     points[p * 2] = (float) point.getDouble(0);
                     points[p * 2 + 1] = (float) point.getDouble(1);
                 }
@@ -188,21 +390,26 @@ public class PolygonMapView extends View {
         boolean found = false;
 
         for (SectorManager.Sector sector : sectors) {
-            float[] points = sector.points;
-            for (int i = 0; i < points.length; i += 2) {
-                float x = points[i];
-                float y = points[i + 1];
+            RectF b = sector.bounds;
 
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y);
-                maxY = Math.max(maxY, y);
-                found = true;
+            if (b.width() <= 0f || b.height() <= 0f) {
+                continue;
             }
+
+            minX = Math.min(minX, b.left);
+            maxX = Math.max(maxX, b.right);
+            minY = Math.min(minY, b.top);
+            maxY = Math.max(maxY, b.bottom);
+            found = true;
         }
 
         for (Road road : roads) {
             RectF b = road.bounds;
+
+            if (b.width() <= 0f || b.height() <= 0f) {
+                continue;
+            }
+
             minX = Math.min(minX, b.left);
             maxX = Math.max(maxX, b.right);
             minY = Math.min(minY, b.top);
@@ -211,22 +418,56 @@ public class PolygonMapView extends View {
         }
 
         if (found) {
-            dataCenterX = (minX + maxX) / 2f;
-            dataCenterY = (minY + maxY) / 2f;
+            dataMinX = minX;
+            dataMinY = minY;
+            dataMaxX = maxX;
+            dataMaxY = maxY;
+
+            dataCenterX = (minX + maxX) * 0.5f;
+            dataCenterY = (minY + maxY) * 0.5f;
         }
     }
 
+    private void buildSpatialIndexes() {
+        /*
+         * 12 x 12 is deliberately modest: enough partitioning to avoid
+         * scanning the entire El Tigre map while keeping the index tiny.
+         */
+        sectorGrid.build(
+                sectors,
+                dataMinX,
+                dataMinY,
+                dataMaxX,
+                dataMaxY,
+                12,
+                12,
+                SECTOR_BOUNDS_PROVIDER
+        );
+
+        roadGrid.build(
+                roads,
+                dataMinX,
+                dataMinY,
+                dataMaxX,
+                dataMaxY,
+                12,
+                12,
+                ROAD_BOUNDS_PROVIDER
+        );
+    }
+
     private void buildRoadLabels() {
-        Set<String> alreadyPlaced = new HashSet<>();
+        Map<String, RoadLabel> bestByName = new HashMap<>();
 
         for (Road road : roads) {
             if (!LABEL_TYPES.contains(road.type) || road.name.isEmpty()) {
                 continue;
             }
 
-            if (alreadyPlaced.contains(road.name)) {
-                continue;
-            }
+            String normalizedName = road.name
+                    .replaceAll("\\s+", " ")
+                    .trim()
+                    .toUpperCase(Locale.ROOT);
 
             float[] longestSegment = findLongestSegment(road.path);
 
@@ -244,33 +485,57 @@ public class PolygonMapView extends View {
 
             double angle = Math.toDegrees(Math.atan2(y2 - y1, x2 - x1));
 
-            // Keep labels roughly readable instead of upside-down.
-            if (angle > 90 || angle < -90) {
-                angle += 180;
+            // Keep labels readable instead of upside-down.
+            if (angle > 90.0 || angle < -90.0) {
+                angle += 180.0;
             }
 
             float length = (float) Math.hypot(x2 - x1, y2 - y1);
 
-            roadLabels.add(
-                    new RoadLabel(
-                            road.name,
-                            x,
-                            y,
-                            (float) angle,
-                            length
-                    )
+            RoadLabel candidate = new RoadLabel(
+                    road.name,
+                    x,
+                    y,
+                    (float) angle,
+                    length,
+                    road.priority()
             );
 
-            alreadyPlaced.add(road.name);
+            RoadLabel previous = bestByName.get(normalizedName);
+
+            /*
+             * Prefer the most important road. If priority is equal, use the
+             * longest segment because it normally provides the cleanest label.
+             */
+            if (previous == null ||
+                    candidate.priority > previous.priority ||
+                    (candidate.priority == previous.priority &&
+                            candidate.length > previous.length)) {
+                bestByName.put(normalizedName, candidate);
+            }
         }
+
+        roadLabels.clear();
+        roadLabels.addAll(bestByName.values());
+
+        // Highest-priority and longest labels are considered first for placement.
+        Collections.sort(
+                roadLabels,
+                new Comparator<RoadLabel>() {
+                    @Override
+                    public int compare(RoadLabel a, RoadLabel b) {
+                        if (a.priority != b.priority) {
+                            return b.priority - a.priority;
+                        }
+
+                        return Float.compare(b.length, a.length);
+                    }
+                }
+        );
     }
 
     private float[] findLongestSegment(Path path) {
-        // Android Path is iterable only through PathMeasure, so use PathMeasure
-        // to recover a representative long segment.
-        android.graphics.PathMeasure measure =
-                new android.graphics.PathMeasure(path, false);
-
+        PathMeasure measure = new PathMeasure(path, false);
         float total = measure.getLength();
 
         if (total <= 0f) {
@@ -286,7 +551,10 @@ public class PolygonMapView extends View {
         float[] p1 = new float[2];
         float[] p2 = new float[2];
 
-        final int samples = Math.max(2, Math.min(24, (int) (total / 35f)));
+        final int samples = Math.max(
+                2,
+                Math.min(24, (int) (total / 35f))
+        );
 
         measure.getPosTan(0f, p1, null);
 
@@ -311,6 +579,10 @@ public class PolygonMapView extends View {
             p1[1] = p2[1];
         }
 
+        if (bestLength <= 0f) {
+            return null;
+        }
+
         return new float[]{
                 bestX1, bestY1,
                 bestX2, bestY2
@@ -329,32 +601,12 @@ public class PolygonMapView extends View {
     }
 
     private void calculateInitialScale(int width, int height) {
-        if (sectors.isEmpty()) {
+        if (dataMaxX <= dataMinX || dataMaxY <= dataMinY) {
             return;
         }
 
-        float minX = Float.MAX_VALUE;
-        float minY = Float.MAX_VALUE;
-        float maxX = -Float.MAX_VALUE;
-        float maxY = -Float.MAX_VALUE;
-
-        for (SectorManager.Sector sector : sectors) {
-            float[] points = sector.points;
-
-            for (int i = 0; i < points.length; i += 2) {
-                minX = Math.min(minX, points[i]);
-                maxX = Math.max(maxX, points[i]);
-                minY = Math.min(minY, points[i + 1]);
-                maxY = Math.max(maxY, points[i + 1]);
-            }
-        }
-
-        float dataWidth = maxX - minX;
-        float dataHeight = maxY - minY;
-
-        if (dataWidth <= 0f || dataHeight <= 0f) {
-            return;
-        }
+        float dataWidth = dataMaxX - dataMinX;
+        float dataHeight = dataMaxY - dataMinY;
 
         float availableWidth = width * 0.88f;
         float availableHeight = height * 0.72f;
@@ -363,7 +615,20 @@ public class PolygonMapView extends View {
         float scaleY = availableHeight / dataHeight;
 
         initialScale = Math.min(scaleX, scaleY);
+
+        if (initialScale <= 0f || Float.isNaN(initialScale)) {
+            return;
+        }
+
         mapScale = initialScale;
+    }
+
+    private float getZoomRatio() {
+        if (initialScale <= 0f) {
+            return 1f;
+        }
+
+        return mapScale / initialScale;
     }
 
     @Override
@@ -372,6 +637,11 @@ public class PolygonMapView extends View {
 
         backgroundPaint.setColor(0xFF05060B);
         canvas.drawRect(0, 0, getWidth(), getHeight(), backgroundPaint);
+
+        if (mapScale <= 0f) {
+            drawHeader(canvas);
+            return;
+        }
 
         canvas.save();
 
@@ -384,10 +654,20 @@ public class PolygonMapView extends View {
         canvas.translate(-dataCenterX, -dataCenterY);
 
         RectF visible = getVisibleDataRect();
+        float zoomRatio = getZoomRatio();
 
-        drawRoads(canvas, visible);
+        // Sectors remain useful at every zoom level.
         drawSectors(canvas, visible);
-        drawRoadLabels(canvas, visible);
+
+        // Roads use automatic LOD.
+        if (zoomRatio >= LOD_MAIN_ROADS) {
+            drawRoads(canvas, visible, zoomRatio);
+        }
+
+        // Labels use a separate, more conservative LOD.
+        if (zoomRatio >= 0.85f) {
+            drawRoadLabels(canvas, visible, zoomRatio);
+        }
 
         canvas.restore();
 
@@ -395,10 +675,27 @@ public class PolygonMapView extends View {
     }
 
     private RectF getVisibleDataRect() {
-        float left = (0f - getWidth() / 2f - mapOffsetX) / mapScale + dataCenterX;
-        float right = (getWidth() - getWidth() / 2f - mapOffsetX) / mapScale + dataCenterX;
-        float top = (0f - getHeight() / 2f - mapOffsetY) / mapScale + dataCenterY;
-        float bottom = (getHeight() - getHeight() / 2f - mapOffsetY) / mapScale + dataCenterY;
+        float safeScale = Math.max(0.0001f, mapScale);
+
+        float left =
+                (0f - getWidth() / 2f - mapOffsetX)
+                        / safeScale
+                        + dataCenterX;
+
+        float right =
+                (getWidth() - getWidth() / 2f - mapOffsetX)
+                        / safeScale
+                        + dataCenterX;
+
+        float top =
+                (0f - getHeight() / 2f - mapOffsetY)
+                        / safeScale
+                        + dataCenterY;
+
+        float bottom =
+                (getHeight() - getHeight() / 2f - mapOffsetY)
+                        / safeScale
+                        + dataCenterY;
 
         // Small margin avoids pop-in while panning.
         float marginX = Math.abs(right - left) * 0.08f;
@@ -412,9 +709,28 @@ public class PolygonMapView extends View {
         );
     }
 
-    private void drawRoads(Canvas canvas, RectF visible) {
-        for (Road road : roads) {
-            if (!RectF.intersects(road.bounds, visible)) {
+    private void drawRoads(
+            Canvas canvas,
+            RectF visible,
+            float zoomRatio
+    ) {
+        ArrayList<Road> visibleRoads =
+                roadGrid.query(visible, ROAD_BOUNDS_PROVIDER);
+
+        for (Road road : visibleRoads) {
+            int priority = road.priority();
+
+            /*
+             * LOD:
+             * 0.55-0.90 -> motorway/trunk/primary/secondary
+             * 0.90-1.80 -> + tertiary
+             * >1.80      -> all roads
+             */
+            if (zoomRatio < LOD_TERTIARY && priority < 2) {
+                continue;
+            }
+
+            if (zoomRatio < LOD_ALL_ROADS && priority < 1) {
                 continue;
             }
 
@@ -447,67 +763,124 @@ public class PolygonMapView extends View {
         sectorPaint.setStrokeWidth(1.6f);
         sectorPaint.setColor(0x553E4652);
 
-        for (SectorManager.Sector sector : sectors) {
-            float[] points = sector.points;
+        ArrayList<SectorManager.Sector> visibleSectors =
+                sectorGrid.query(visible, SECTOR_BOUNDS_PROVIDER);
 
-            if (points.length < 6) {
+        for (SectorManager.Sector sector : visibleSectors) {
+            if (sector.points.length < 6) {
                 continue;
             }
 
-            reusablePath.reset();
-            reusablePath.moveTo(points[0], points[1]);
-
-            float minX = points[0];
-            float maxX = points[0];
-            float minY = points[1];
-            float maxY = points[1];
-
-            for (int i = 2; i < points.length; i += 2) {
-                float x = points[i];
-                float y = points[i + 1];
-
-                reusablePath.lineTo(x, y);
-
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y);
-                maxY = Math.max(maxY, y);
-            }
-
-            reusablePath.close();
-
-            if (maxX < visible.left ||
-                    minX > visible.right ||
-                    maxY < visible.top ||
-                    minY > visible.bottom) {
-                continue;
-            }
-
-            canvas.drawPath(reusablePath, sectorPaint);
+            // Path and bounds were computed once during loading.
+            canvas.drawPath(sector.path, sectorPaint);
         }
     }
 
-    private void drawRoadLabels(Canvas canvas, RectF visible) {
-        if (mapScale < initialScale * 0.72f) {
-            return;
+    private void drawRoadLabels(
+            Canvas canvas,
+            RectF visible,
+            float zoomRatio
+    ) {
+        /*
+         * At lower zooms show fewer labels. At close zooms, allow all
+         * configured major-road labels, still subject to collision tests.
+         */
+        float labelDensity;
+
+        if (zoomRatio < 1.10f) {
+            labelDensity = 0.72f;
+        } else if (zoomRatio < 1.80f) {
+            labelDensity = 0.88f;
+        } else {
+            labelDensity = 1.0f;
         }
 
+        occupiedLabelBounds.clear();
+
+        float textSizePx;
+
+        if (zoomRatio < 1.10f) {
+            textSizePx = 9f;
+        } else if (zoomRatio < 1.80f) {
+            textSizePx = 9.5f;
+        } else {
+            textSizePx = 10f;
+        }
+
+        roadLabelPaint.setTextSize(textSizePx);
+
+        int maxLabels;
+
+        if (zoomRatio < 1.10f) {
+            maxLabels = 14;
+        } else if (zoomRatio < 1.80f) {
+            maxLabels = 24;
+        } else {
+            maxLabels = 40;
+        }
+
+        int drawn = 0;
+
         for (RoadLabel label : roadLabels) {
+            if (drawn >= maxLabels) {
+                break;
+            }
+
             if (!visible.contains(label.x, label.y)) {
                 continue;
             }
 
-            float textSize = Math.max(
-                    9f,
-                    Math.min(
-                            15f,
-                            12f / Math.max(0.8f, (initialScale / mapScale))
-                    )
-            );
+            // Low zoom: prioritize important roads and skip some labels.
+            if (labelDensity < 1.0f &&
+                    label.priority <= 1 &&
+                    ((int) (label.length + label.x + label.y) & 1) == 0) {
+                continue;
+            }
 
-            roadLabelPaint.setTextSize(textSize);
+            String displayName = label.name.toUpperCase(Locale.ROOT);
+
+            float textWidth = roadLabelPaint.measureText(displayName);
+
+            /*
+             * Convert the screen-space text size to map/data-space so the
+             * collision test remains correct while the canvas is scaled.
+             */
+            float safeScale = Math.max(0.0001f, mapScale);
+            float dataTextWidth = textWidth / safeScale;
+            float dataTextHeight = textSizePx / safeScale;
+
+            /*
+             * Account approximately for rotation by using the rotated
+             * axis-aligned bounding box.
+             */
+            double radians = Math.toRadians(label.angleDegrees);
+            float sin = (float) Math.abs(Math.sin(radians));
+            float cos = (float) Math.abs(Math.cos(radians));
+
+            float halfWidth =
+                    (dataTextWidth * cos + dataTextHeight * sin) * 0.5f;
+
+            float halfHeight =
+                    (dataTextWidth * sin + dataTextHeight * cos) * 0.5f;
+
+            // Extra breathing room keeps labels from visually touching.
+            float padding = 5f / safeScale;
+
+            float left = label.x - halfWidth - padding;
+            float top = label.y - halfHeight - padding;
+            float right = label.x + halfWidth + padding;
+            float bottom = label.y + halfHeight + padding;
+
+            if (!isLabelAreaFree(left, top, right, bottom)) {
+                continue;
+            }
+
+            RectF occupied = obtainOccupiedRect(drawn);
+            occupied.set(left, top, right, bottom);
+            occupiedLabelBounds.add(occupied);
 
             canvas.save();
+
             canvas.rotate(
                     label.angleDegrees,
                     label.x,
@@ -515,14 +888,42 @@ public class PolygonMapView extends View {
             );
 
             canvas.drawText(
-                    label.name.toUpperCase(Locale.ROOT),
+                    displayName,
                     label.x,
                     label.y,
                     roadLabelPaint
             );
 
             canvas.restore();
+
+            drawn++;
         }
+    }
+
+    private RectF obtainOccupiedRect(int index) {
+        while (occupiedLabelBounds.size() <= index) {
+            occupiedLabelBounds.add(new RectF());
+        }
+
+        return occupiedLabelBounds.get(index);
+    }
+
+    private boolean isLabelAreaFree(
+            float left,
+            float top,
+            float right,
+            float bottom
+    ) {
+        for (RectF occupied : occupiedLabelBounds) {
+            if (occupied.left < right &&
+                    occupied.right > left &&
+                    occupied.top < bottom &&
+                    occupied.bottom > top) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void drawHeader(Canvas canvas) {
@@ -596,6 +997,7 @@ public class PolygonMapView extends View {
                         float scaleFactor = newDistance / oldDistance;
 
                         float newScale = oldScale * scaleFactor;
+
                         newScale = Math.max(
                                 initialScale * MIN_ZOOM,
                                 Math.min(
