@@ -42,8 +42,9 @@ public class PolygonMapView extends View {
     private final SpatialGrid<Road> roadGrid = new SpatialGrid<>();
     private final SpatialGrid<SectorManager.Sector> sectorGrid = new SpatialGrid<>();
 
-    // Reused label collision rectangles. No per-frame RectF allocations.
+    // Reused label collision rectangles. The list acts as a small object pool.
     private final ArrayList<RectF> occupiedLabelBounds = new ArrayList<>();
+    private int occupiedLabelCount = 0;
 
     private float mapOffsetX = 0f;
     private float mapOffsetY = 0f;
@@ -69,7 +70,7 @@ public class PolygonMapView extends View {
     private boolean zooming = false;
 
     private static final float MIN_ZOOM = 0.35f;
-    private static final float MAX_ZOOM = 5.0f;
+    private static final float MAX_ZOOM = 10.0f;
 
     /*
      * LOD is based on zoom relative to the initial map fit.
@@ -82,6 +83,19 @@ public class PolygonMapView extends View {
     private static final float LOD_MAIN_ROADS = 0.55f;
     private static final float LOD_TERTIARY = 0.90f;
     private static final float LOD_ALL_ROADS = 1.80f;
+
+    /*
+     * Known out-of-map road fragments visible in the source dataset.
+     * These are intentionally expressed in data coordinates so the cleanup
+     * remains stable regardless of screen size or zoom.
+     *
+     * Each zone is: left, top, right, bottom.
+     */
+    private static final float[][] EXCLUDED_ROAD_ZONES = {
+            {-130f, 530f, 90f, 770f},
+            {170f, 780f, 410f, 1045f},
+            {900f, 650f, 1515f, 1280f}
+    };
 
     private static final Set<String> LABEL_TYPES = new HashSet<>();
 
@@ -373,13 +387,39 @@ public class PolygonMapView extends View {
                 }
 
                 if (points.length >= 4) {
-                    roads.add(new Road(type, name, points));
+                    Road road = new Road(type, name, points);
+
+                    // Remove isolated road fragments that unnecessarily expand
+                    // the map bounds and are outside the useful city area.
+                    if (!isExcludedRoad(road)) {
+                        roads.add(road);
+                    }
                 }
             }
 
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    private boolean isExcludedRoad(Road road) {
+        if (road.bounds.width() <= 0f || road.bounds.height() <= 0f) {
+            return false;
+        }
+
+        float centerX = (road.bounds.left + road.bounds.right) * 0.5f;
+        float centerY = (road.bounds.top + road.bounds.bottom) * 0.5f;
+
+        for (float[] zone : EXCLUDED_ROAD_ZONES) {
+            if (centerX >= zone[0] &&
+                    centerX <= zone[2] &&
+                    centerY >= zone[1] &&
+                    centerY <= zone[3]) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void calculateDataBounds() {
@@ -614,7 +654,9 @@ public class PolygonMapView extends View {
         float scaleX = availableWidth / dataWidth;
         float scaleY = availableHeight / dataHeight;
 
-        initialScale = Math.min(scaleX, scaleY);
+        // Start slightly closer than a strict fit so the city is immediately
+        // readable without requiring the first pinch gesture.
+        initialScale = Math.min(scaleX, scaleY) * 1.10f;
 
         if (initialScale <= 0f || Float.isNaN(initialScale)) {
             return;
@@ -795,7 +837,7 @@ public class PolygonMapView extends View {
             labelDensity = 1.0f;
         }
 
-        occupiedLabelBounds.clear();
+        occupiedLabelCount = 0;
 
         float textSizePx;
 
@@ -875,9 +917,9 @@ public class PolygonMapView extends View {
                 continue;
             }
 
-            RectF occupied = obtainOccupiedRect(drawn);
+            RectF occupied = obtainOccupiedRect(occupiedLabelCount);
             occupied.set(left, top, right, bottom);
-            occupiedLabelBounds.add(occupied);
+            occupiedLabelCount++;
 
             canvas.save();
 
@@ -914,7 +956,9 @@ public class PolygonMapView extends View {
             float right,
             float bottom
     ) {
-        for (RectF occupied : occupiedLabelBounds) {
+        for (int i = 0; i < occupiedLabelCount; i++) {
+            RectF occupied = occupiedLabelBounds.get(i);
+
             if (occupied.left < right &&
                     occupied.right > left &&
                     occupied.top < bottom &&

@@ -14,6 +14,19 @@ import java.util.List;
 
 public class SectorManager {
 
+    /*
+     * These three areas are outside the useful city footprint in the current
+     * source map. Filtering them here prevents them from expanding the map's
+     * bounds while keeping the original sectors.json untouched.
+     *
+     * Each zone is: left, top, right, bottom.
+     */
+    private static final float[][] EXCLUDED_SECTOR_ZONES = {
+            {-130f, 520f, 90f, 800f},
+            {170f, 770f, 410f, 1050f},
+            {900f, 650f, 1515f, 1280f}
+    };
+
     public static class Sector {
         public final String id;
         public final String status;
@@ -83,13 +96,37 @@ public class SectorManager {
                 }
 
                 if (coordinates.length >= 6) {
-                    sectors.add(new Sector(id, status, coordinates));
+                    Sector sector = new Sector(id, status, coordinates);
+
+                    if (!isExcludedSector(sector)) {
+                        sectors.add(sector);
+                    }
                 }
             }
 
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    private boolean isExcludedSector(Sector sector) {
+        if (sector.bounds.width() <= 0f || sector.bounds.height() <= 0f) {
+            return false;
+        }
+
+        float centerX = (sector.bounds.left + sector.bounds.right) * 0.5f;
+        float centerY = (sector.bounds.top + sector.bounds.bottom) * 0.5f;
+
+        for (float[] zone : EXCLUDED_SECTOR_ZONES) {
+            if (centerX >= zone[0] &&
+                    centerX <= zone[2] &&
+                    centerY >= zone[1] &&
+                    centerY <= zone[3]) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public List<Sector> getSectors() {
