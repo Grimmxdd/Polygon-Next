@@ -32,9 +32,13 @@ public class PolygonMapView extends View {
     private final Paint roadPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint sectorPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint roadLabelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint zoneFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint zoneLabelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private final SectorManager sectorManager;
     private final List<SectorManager.Sector> sectors;
+    private final ZoneManager zoneManager;
+    private final List<ZoneManager.Zone> zones;
     private final List<Road> roads = new ArrayList<>();
     private final List<RoadLabel> roadLabels = new ArrayList<>();
 
@@ -307,6 +311,17 @@ public class PolygonMapView extends View {
 
         sectorManager = new SectorManager(context);
         sectors = sectorManager.getSectors();
+        zoneManager = new ZoneManager(context, sectors);
+        zones = zoneManager.getZones();
+
+        zoneFillPaint.setStyle(Paint.Style.FILL);
+        zoneFillPaint.setAntiAlias(true);
+
+        zoneLabelPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        zoneLabelPaint.setTextAlign(Paint.Align.CENTER);
+        zoneLabelPaint.setAntiAlias(true);
+        zoneLabelPaint.setColor(0xD9F2F5F7);
+        zoneLabelPaint.setShadowLayer(5f, 0f, 1f, 0x99000000);
 
         loadRoads(context);
         calculateDataBounds();
@@ -671,6 +686,10 @@ public class PolygonMapView extends View {
         RectF visible = getVisibleDataRect();
         float zoomRatio = getZoomRatio();
 
+        // Named zones are the high-level visual layer; the original Hxxx grid
+        // remains underneath for precision and future reporting.
+        drawNamedZones(canvas, visible, zoomRatio);
+
         // Sectors remain useful at every zoom level.
         drawSectors(canvas, visible);
 
@@ -770,6 +789,58 @@ public class PolygonMapView extends View {
 
             canvas.drawPath(road.path, roadPaint);
         }
+    }
+
+    private void drawNamedZones(Canvas canvas, RectF visible, float zoomRatio) {
+        if (zones.isEmpty()) {
+            return;
+        }
+
+        // Keep the zone layer subtle so roads remain the primary map geometry.
+        if (zoomRatio <= 3.8f) {
+            ArrayList<SectorManager.Sector> visibleSectors =
+                    sectorGrid.query(visible, SECTOR_BOUNDS_PROVIDER);
+
+            for (SectorManager.Sector sector : visibleSectors) {
+                ZoneManager.Zone zone = zoneManager.getZoneForSector(sector.id);
+                if (zone == null) {
+                    continue;
+                }
+
+                zoneFillPaint.setColor(zoneColor(zone.id));
+                canvas.drawPath(sector.path, zoneFillPaint);
+            }
+        }
+
+        // Named labels are intentionally hidden once the user zooms in enough
+        // that streets/cells become more useful than neighborhood names.
+        if (zoomRatio <= 3.8f) {
+            float textSize = Math.max(11f, Math.min(18f, 13f / Math.max(0.75f, zoomRatio * 0.55f)));
+            zoneLabelPaint.setTextSize(textSize);
+
+            for (ZoneManager.Zone zone : zones) {
+                if (!visible.contains(zone.x, zone.y)) {
+                    continue;
+                }
+
+                canvas.drawText(zone.name, zone.x, zone.y, zoneLabelPaint);
+            }
+        }
+    }
+
+    private int zoneColor(String id) {
+        // Low-alpha fills: they tint the map without hiding OSM geometry.
+        if ("pueblo_nuevo_norte".equals(id)) return 0x2418A9AE;
+        if ("pueblo_nuevo_sur".equals(id)) return 0x242A9FD6;
+        if ("la_charneca".equals(id)) return 0x2436B37E;
+        if ("casco_viejo".equals(id)) return 0x24E0B94A;
+        if ("hernandez_pares".equals(id)) return 0x24C85A8A;
+        if ("simon_bolivar_i".equals(id)) return 0x247E57C2;
+        if ("la_esperanza".equals(id)) return 0x24D08A4A;
+        if ("las_delicias".equals(id)) return 0x24A85AD6;
+        if ("meneven".equals(id)) return 0x24C94D70;
+        if ("san_valentin".equals(id)) return 0x24E06A3D;
+        return 0x1826A69A;
     }
 
     private void drawSectors(Canvas canvas, RectF visible) {
