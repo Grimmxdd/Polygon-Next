@@ -1,0 +1,28 @@
+{
+  "city": "El Tigre",
+  "version": "1.0",
+  "coordinateSystem": "latlon-seed",
+  "projection": {
+    "minLat": 8.8304,
+    "minLon": -64.2972,
+    "maxLat": 8.9329,
+    "maxLon": -64.2026,
+    "width": 1400.0,
+    "height": 1400.0
+  },
+  "geometryType": "seeded-voronoi-on-sector-grid",
+  "geometryNote": "Display regions are derived from verified OSM locality positions and the existing H-sector grid. They are not presented as legal or official neighborhood boundaries. Areas with an actual OSM administrative boundary can be upgraded to exact geometry later.",
+  "source": "OpenStreetMap-derived locality data via Mapcarta/OpenAlfa, cross-checked with local El Tigre sources",
+  "zones": [
+    {"id":"pueblo_nuevo_norte","name":"Pueblo Nuevo Norte","lat":8.8931,"lon":-64.25299,"sourceOsmNode":5613516447,"geometryConfidence":"medium"},
+    {"id":"pueblo_nuevo_sur","name":"Pueblo Nuevo Sur","lat":8.88442,"lon":-64.24061,"sourceOsmNode":5613516446,"geometryConfidence":"medium"},
+    {"id":"la_charneca","name":"La Charneca","lat":8.88959,"lon":-64.26738,"sourceOsmNode":5613516452,"geometryConfidence":"high"},
+    {"id":"casco_viejo","name":"Casco Viejo","lat":8.88237,"lon":-64.26383,"sourceOsmNode":5613516459,"geometryConfidence":"high"},
+    {"id":"hernandez_pares","name":"Hernández Pares","lat":8.88024,"lon":-64.27117,"sourceOsmNode":5613516454,"geometryConfidence":"medium"},
+    {"id":"simon_bolivar_i","name":"Simón Bolívar I","lat":8.88518,"lon":-64.27500,"sourceOsmNode":5613516453,"geometryConfidence":"medium"},
+    {"id":"la_esperanza","name":"La Esperanza","lat":8.88259,"lon":-64.25347,"sourceOsmNode":5613516458,"geometryConfidence":"medium"},
+    {"id":"las_delicias","name":"Las Delicias","lat":8.87428,"lon":-64.25560,"sourceOsmNode":5613516461,"geometryConfidence":"medium"},
+    {"id":"meneven","name":"Meneven","lat":8.87294,"lon":-64.23550,"sourceOsmNode":5613516457,"geometryConfidence":"medium"},
+    {"id":"san_valentin","name":"San Valentín","lat":8.86832,"lon":-64.24164,"sourceOsmNode":5613516463,"geometryConfidence":"medium"}
+  ]
+}
